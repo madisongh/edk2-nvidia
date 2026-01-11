@@ -654,71 +654,6 @@ WriteImage (
 }
 
 /**
-  Write FW package data to all FwImages except for special images.
-
-  @param[in]  Header                Pointer to the FW package header
-
-  @retval EFI_SUCCESS               The operation completed successfully
-  @retval Others                    An error occurred
-
-**/
-STATIC
-EFI_STATUS
-EFIAPI
-WriteRegularImages (
-  IN  CONST FW_PACKAGE_HEADER  *Header
-  )
-{
-  EFI_STATUS                Status;
-  UINTN                     Index;
-  UINTN                     PkgImageIndex;
-  UINTN                     ImageCount;
-  NVIDIA_FW_IMAGE_PROTOCOL  **FwImageProtocolArray;
-
-  ImageCount           = FwImageGetCount ();
-  FwImageProtocolArray = FwImageGetProtocolArray ();
-
-  // Write all images except special ones that are done later
-  for (Index = 0; Index < ImageCount; Index++) {
-    CONST CHAR16              *ImageName;
-    NVIDIA_FW_IMAGE_PROTOCOL  *FwImageProtocol;
-
-    FwImageProtocol = FwImageProtocolArray[Index];
-    ImageName       = FwImageProtocol->ImageName;
-    if (IsSpecialImageName (ImageName)) {
-      continue;
-    }
-
-    Status = GetPackageImageIndex (
-               Header,
-               ImageName,
-               &PkgImageIndex
-               );
-    if (EFI_ERROR (Status)) {
-      DEBUG ((DEBUG_INFO, "%a: No image for partition %s: %r\n", __FUNCTION__, ImageName, Status));
-
-      if (NameIsInList (ImageName, mFwImagesRequired)) {
-        DEBUG ((DEBUG_ERROR, "%a: Missing required image for partition %s: %r\n", __FUNCTION__, ImageName, Status));
-        return Status;
-      }
-
-      continue;
-    }
-
-    Status = WriteImage (
-               Header,
-               ImageName,
-               FW_IMAGE_RW_FLAG_NONE
-               );
-    if (EFI_ERROR (Status)) {
-      return Status;
-    }
-  }
-
-  return EFI_SUCCESS;
-}
-
-/**
   Verify that a FwImage matches its FW package data.  If PcdFmpWriteVerifyImage
   is FALSE, no verification is done and EFI_SUCCESS is returned.
 
@@ -739,7 +674,8 @@ VerifyImage (
   IN  CONST FW_PACKAGE_HEADER  *Header,
   IN  CONST CHAR16             *Name,
   IN  UINTN                    Flags,
-  IN  UINTN                    CompareDebugLevel
+  IN  UINTN                    CompareDebugLevel,
+  IN  BOOLEAN                  InternalUsage
   )
 {
   NVIDIA_FW_IMAGE_PROTOCOL     *FwImageProtocol;
@@ -751,7 +687,7 @@ VerifyImage (
   UINTN                        ImageIndex;
   FW_IMAGE_ATTRIBUTES          ImageAttributes;
 
-  if (!mPcdFmpWriteVerifyImage) {
+  if (!InternalUsage && !mPcdFmpWriteVerifyImage) {
     return EFI_SUCCESS;
   }
 
@@ -821,21 +757,108 @@ VerifyImage (
     }
 
     if (CompareMem (mFmpDataBuffer, DataBuffer + VerifyOffset, VerifySize) != 0) {
-      DEBUG ((
-        CompareDebugLevel,
-        "Image=%s failed verify near offset=%u\n",
-        Name,
-        VerifyOffset
-        ));
+      if (InternalUsage) {
+        DEBUG ((CompareDebugLevel,
+                "Image=%s needs updating\n",
+                Name
+               ));
+      } else {
+        DEBUG ((
+                 CompareDebugLevel,
+                 "Image=%s failed verify near offset=%u\n",
+                 Name,
+                 VerifyOffset
+               ));
+      }
       return EFI_VOLUME_CORRUPTED;
     }
 
     VerifyOffset += VerifySize;
     Bytes        -= VerifySize;
-    ImageVerifyProgress (VerifySize);
+    if (!InternalUsage) {
+      ImageVerifyProgress (VerifySize);
+    }
   }
 
   return Status;
+}
+
+/**
+  Write FW package data to all FwImages except for special images.
+
+  @param[in]  Header                Pointer to the FW package header
+
+  @retval EFI_SUCCESS               The operation completed successfully
+  @retval Others                    An error occurred
+
+**/
+STATIC
+EFI_STATUS
+EFIAPI
+WriteRegularImages (
+  IN  CONST FW_PACKAGE_HEADER  *Header
+  )
+{
+  EFI_STATUS                Status;
+  UINTN                     Index;
+  UINTN                     PkgImageIndex;
+  UINTN                     ImageCount;
+  NVIDIA_FW_IMAGE_PROTOCOL  **FwImageProtocolArray;
+
+  ImageCount           = FwImageGetCount ();
+  FwImageProtocolArray = FwImageGetProtocolArray ();
+
+  // Write all images except special ones that are done later
+  for (Index = 0; Index < ImageCount; Index++) {
+    CONST CHAR16              *ImageName;
+    NVIDIA_FW_IMAGE_PROTOCOL  *FwImageProtocol;
+
+    FwImageProtocol = FwImageProtocolArray[Index];
+    ImageName       = FwImageProtocol->ImageName;
+    if (IsSpecialImageName (ImageName)) {
+      continue;
+    }
+
+    Status = GetPackageImageIndex (
+               Header,
+               ImageName,
+               &PkgImageIndex
+               );
+    if (EFI_ERROR (Status)) {
+      DEBUG ((DEBUG_INFO, "%a: No image for partition %s: %r\n", __FUNCTION__, ImageName, Status));
+
+      if (NameIsInList (ImageName, mFwImagesRequired)) {
+        DEBUG ((DEBUG_ERROR, "%a: Missing required image for partition %s: %r\n", __FUNCTION__, ImageName, Status));
+        return Status;
+      }
+
+      continue;
+    }
+
+    Status = VerifyImage (
+               Header,
+               ImageName,
+               FW_IMAGE_RW_FLAG_READ_INACTIVE_IMAGE,
+               DEBUG_ERROR,
+               TRUE
+               );
+    if (Status == EFI_SUCCESS) {
+      CONST FW_PACKAGE_IMAGE_INFO  *PkgImageInfo = FwPackageImageInfoPtr (Header, PkgImageIndex);
+      DEBUG ((DEBUG_INFO, "%a: no change for partition %s, skipping write\n", __FUNCTION__, ImageName));
+      ImageWriteProgress (PkgImageInfo->Bytes);
+      continue;
+    }
+    Status = WriteImage (
+      Header,
+      ImageName,
+      FW_IMAGE_RW_FLAG_NONE
+    );
+    if (EFI_ERROR (Status)) {
+      return Status;
+    }
+  }
+
+  return EFI_SUCCESS;
 }
 
 /**
@@ -899,7 +922,8 @@ VerifyAllImages (
                Header,
                ImageName,
                FW_IMAGE_RW_FLAG_READ_INACTIVE_IMAGE,
-               DEBUG_ERROR
+               DEBUG_ERROR,
+               FALSE
                );
     if (EFI_ERROR (Status)) {
       return Status;
@@ -1044,7 +1068,7 @@ FmpTegraSetSingleImage (
 
   SetImageProgress (FMP_PROGRESS_WRITE_IMAGES);
 
-  Status = VerifyImage (Header, PkgName, WriteFlag, DEBUG_ERROR);
+  Status = VerifyImage (Header, PkgName, WriteFlag, DEBUG_ERROR, FALSE);
   if (EFI_ERROR (Status)) {
     return Status;
   }
@@ -1335,6 +1359,7 @@ FmpTegraSetImage (
   EFI_STATUS               Status;
   BOOLEAN                  GptUpdate;
   UINTN                    GptImageIndex;
+  BOOLEAN                  Mb1Update;
 
   DEBUG ((
     DEBUG_INFO,
@@ -1402,7 +1427,8 @@ FmpTegraSetImage (
                Header,
                L"GPT",
                FW_IMAGE_RW_FLAG_READ_INACTIVE_IMAGE,
-               DEBUG_INFO
+               DEBUG_INFO,
+               TRUE
                );
     if ((Status != EFI_VOLUME_CORRUPTED) && (Status != EFI_SUCCESS)) {
       DEBUG ((DEBUG_ERROR, "%a: error verifying GPT: %r\n", __FUNCTION__, Status));
@@ -1410,7 +1436,7 @@ FmpTegraSetImage (
       return EFI_ABORTED;
     }
 
-    GptUpdate = (Status != EFI_SUCCESS);
+    Mb1Update = GptUpdate = (Status != EFI_SUCCESS);
   }
 
   if (GptUpdate) {
@@ -1420,13 +1446,22 @@ FmpTegraSetImage (
       *LastAttemptStatus = LAS_ERROR_GPT_INVALIDATE_FAILED;
       return EFI_ABORTED;
     }
+  } else {
+    Status = VerifyImage (Header, L"mb1", FW_IMAGE_RW_FLAG_READ_INACTIVE_IMAGE, DEBUG_ERROR, TRUE);
+    Mb1Update = (Status != EFI_SUCCESS);
+    if (Mb1Update) {
+      DEBUG ((DEBUG_INFO, "%a: mb1 needs update (verify status: %r)\n", __FUNCTION__, Status));
+    } else {
+      DEBUG ((DEBUG_INFO, "%a: mb1 does not need updating\n", __FUNCTION__));
+    }
   }
-
-  Status = InvalidateImage (L"mb1", FW_IMAGE_RW_FLAG_NONE);
-  if (EFI_ERROR (Status)) {
-    DEBUG ((DEBUG_ERROR, "Invalidate mb1 failed: %r\n", Status));
-    *LastAttemptStatus = LAS_ERROR_MB1_INVALIDATE_ERROR;
-    return EFI_ABORTED;
+  if (Mb1Update) {
+    Status = InvalidateImage (L"mb1", FW_IMAGE_RW_FLAG_NONE);
+    if (EFI_ERROR (Status)) {
+      DEBUG ((DEBUG_ERROR, "Invalidate mb1 failed: %r\n", Status));
+      *LastAttemptStatus = LAS_ERROR_MB1_INVALIDATE_ERROR;
+      return EFI_ABORTED;
+    }
   }
 
   Status = WriteRegularImages (Header);
@@ -1435,10 +1470,12 @@ FmpTegraSetImage (
     return EFI_ABORTED;
   }
 
-  Status = WriteImage (Header, L"mb1", FW_IMAGE_RW_FLAG_NONE);
-  if (EFI_ERROR (Status)) {
-    *LastAttemptStatus = LAS_ERROR_MB1_WRITE_ERROR;
-    return EFI_ABORTED;
+  if (Mb1Update) {
+    Status = WriteImage (Header, L"mb1", FW_IMAGE_RW_FLAG_NONE);
+    if (EFI_ERROR (Status)) {
+      *LastAttemptStatus = LAS_ERROR_MB1_WRITE_ERROR;
+      return EFI_ABORTED;
+    }
   }
 
   if (GptUpdate) {
