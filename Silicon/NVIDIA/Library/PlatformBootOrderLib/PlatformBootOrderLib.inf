@@ -42,6 +42,7 @@
 
 [Pcd]
   gNVIDIATokenSpaceGuid.PcdIpmiNetworkBootMode
+  gNVIDIATokenSpaceGuid.PcdSingleBootSupport
 
 [Guids]
   gEfiGlobalVariableGuid

@@ -1937,6 +1937,9 @@ PlatformBootManagerBeforeConsole (
       LOAD_OPTION_ACTIVE,
       LoadOptionTypeBoot
       );
+
+    EfiBootManagerRefreshAllBootOption ();
+    SetBootOrder ();
   }
 
   //
