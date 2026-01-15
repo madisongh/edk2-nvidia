@@ -2145,6 +2145,10 @@ PlatformBootManagerBeforeConsole (
     if (!EFI_ERROR (Status)) {
       mRscHandler->Register (SingleBootStatusCodeCallback, TPL_CALLBACK);
     }
+
+    EfiBootManagerRefreshAllBootOption ();
+    SetBootOrder ();
+
   }
 
   //
