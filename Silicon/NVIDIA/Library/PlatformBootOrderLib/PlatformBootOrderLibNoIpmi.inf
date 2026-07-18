@@ -39,6 +39,9 @@
 [Protocols]
   gEfiPciIoProtocolGuid          ## CONSUMES
 
+[Pcd]
+  gNVIDIATokenSpaceGuid.PcdSingleBootSupport
+
 [Guids]
   gEfiGlobalVariableGuid
   gNVIDIATokenSpaceGuid

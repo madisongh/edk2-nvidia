@@ -16,6 +16,12 @@ SetBootOrder (
   );
 
 VOID
+EFIAPI
+SetBootOrderUntracked (
+  VOID
+  );
+
+VOID
 PrintCurrentBootOrder (
   IN CONST UINTN  DebugPrintLevel
   );

@@ -13,6 +13,7 @@
 #include <Library/MemoryAllocationLib.h>
 #include <Library/HobLib.h>
 #include <Library/PlatformResourceLib.h>
+#include <Library/PcdLib.h>
 #include <Library/PrintLib.h>
 #include <Library/UefiBootManagerLib.h>
 #include <Library/UefiLib.h>
@@ -47,6 +48,9 @@ NVIDIA_BOOT_ORDER_PRIORITY  mBootPriorityTemplate[BOOT_ORDER_TEMPLATE_CLASS_COUN
 
 STATIC  NVIDIA_BOOT_ORDER_PRIORITY  *mBootPriorityTable = NULL;
 STATIC  UINTN                       mBootPriorityCount  = 0;
+
+STATIC NVIDIA_BOOT_ORDER_PRIORITY mBootAppTemplate =
+{ "bootapp",    0, MAX_UINT8,             MAX_UINT8,             MAX_UINT8,                MAX_UINTN, MAX_UINTN, MAX_UINTN, MAX_UINTN };
 
 STATIC
 EFI_PCI_IO_PROTOCOL *
@@ -335,6 +339,16 @@ GetBootClassOfOption (
   Bus      = MAX_UINTN;
   Device   = MAX_UINTN;
   Function = MAX_UINTN;
+
+  if (FeaturePcdGet (PcdSingleBootSupport) && StrCmp (Option->Description, L"Boot Application") == 0) {
+    for (BootPriorityIndex = 0; BootPriorityIndex < Count; BootPriorityIndex++) {
+      if (AsciiStrCmp (Table[BootPriorityIndex].OrderName, "bootapp") == 0) {
+        Result = &Table[BootPriorityIndex];
+        goto ReturnResult;
+      }
+    }
+  }
+
   if (StrCmp (Option->Description, L"UEFI Shell") == 0) {
     for (BootPriorityIndex = 0; BootPriorityIndex < Count; BootPriorityIndex++) {
       if (AsciiStrCmp (Table[BootPriorityIndex].OrderName, "shell") == 0) {
@@ -645,17 +659,11 @@ STATIC
 INTN
 EFIAPI
 BootOrderSortCompare (
-  IN CONST VOID  *Buffer1,
-  IN CONST VOID  *Buffer2
+  IN CONST EFI_BOOT_MANAGER_LOAD_OPTION  *Left,
+  IN CONST EFI_BOOT_MANAGER_LOAD_OPTION  *Right
   )
 {
-  INT32  Priority1;
-  INT32  Priority2;
-
-  Priority1 = GetDevicePriority (*(UINT16 *)Buffer1);
-  Priority2 = GetDevicePriority (*(UINT16 *)Buffer2);
-
-  return Priority1 - Priority2;
+  return GetDevicePriority (Left->OptionNumber) - GetDevicePriority (Right->OptionNumber);
 }
 
 STATIC
@@ -681,7 +689,29 @@ ParseDefaultBootPriority (
   UINTN                       BootPrioritySbdfLen;
   UINTN                       BootClassIndex;
 
+  // For single-boot setup, make sure the single-boot app is first
   Priority = 0;
+  if (FeaturePcdGet (PcdSingleBootSupport)) {
+    NVIDIA_BOOT_ORDER_PRIORITY  *NewBuffer;
+    NewBuffer = (NVIDIA_BOOT_ORDER_PRIORITY *)ReallocatePool (
+                                                mBootPriorityCount * sizeof (NVIDIA_BOOT_ORDER_PRIORITY),
+                                                (mBootPriorityCount + 1) * sizeof (NVIDIA_BOOT_ORDER_PRIORITY),
+                                                (VOID *)mBootPriorityTable
+                                              );
+    if (NewBuffer == NULL) {
+      DEBUG ((DEBUG_ERROR, "%a: Failed to allocate boot table buffer\r\n", __FUNCTION__));
+    } else {
+      mBootPriorityTable = NewBuffer;
+      CopyMem (
+        &mBootPriorityTable[mBootPriorityCount],
+        &mBootAppTemplate,
+        sizeof (mBootAppTemplate)
+      );
+      ClassBootPriority = &mBootPriorityTable[mBootPriorityCount++];
+      ClassBootPriority->PriorityOrder = Priority++;
+    }
+  }
+
   // Process the priority order
   Status = GetVariable2 (
              L"DefaultBootPriority",
@@ -794,6 +824,19 @@ ParseDefaultBootPriority (
 
 VOID
 EFIAPI
+SetBootOrderUntracked (
+  VOID
+  )
+{
+
+  ParseDefaultBootPriority ();
+
+  EfiBootManagerSortLoadOptionVariable (LoadOptionTypeBoot, (SORT_COMPARE)BootOrderSortCompare);
+
+}
+
+VOID
+EFIAPI
 SetBootOrder (
   VOID
   )
@@ -818,9 +861,7 @@ SetBootOrder (
     }
   }
 
-  ParseDefaultBootPriority ();
-
-  EfiBootManagerSortLoadOptionVariable (LoadOptionTypeBoot, BootOrderSortCompare);
+  SetBootOrderUntracked ();
 
   VariableData = TRUE;
   gRT->SetVariable (
